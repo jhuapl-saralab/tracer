@@ -130,6 +130,210 @@ about don't re-`exec()` once invoked.
 The `ptrace()` API is kind of brain dead and seems to cause deadlock
 conditions on older kernels.
 
+Example Output
+==============
+
+Using the following example Makefile:
+
+```
+all: foo
+
+foo: foo.o
+	gcc -o foo foo.o -lm
+
+foo.o: foo.c
+	gcc -c foo.c
+
+```
+
+`tracer -E demo.json -- make foo` gives the following JSON output (formatted nicely via `json_pp`):
+
+```
+{
+   "exit_status" : 0,
+   "cwd" : "/home/myuser/tracer/demo",
+   "cmd" : "make",
+   "pid" : 21302,
+   "children" : [
+      {
+         "args" : [
+            "-c",
+            "foo.c"
+         ],
+         "pid" : 21303,
+         "cmd" : "gcc",
+         "children" : [
+            {
+               "args" : [
+                  "-quiet",
+                  "-imultiarch",
+                  "x86_64-linux-gnu",
+                  "foo.c",
+                  "-quiet",
+                  "-dumpbase",
+                  "foo.c",
+                  "-mtune=generic",
+                  "-march=x86-64",
+                  "-auxbase",
+                  "foo",
+                  "-fstack-protector-strong",
+                  "-Wformat",
+                  "-Wformat-security",
+                  "-o",
+                  "/tmp/ccKTtnts.s"
+               ],
+               "cmd" : "/usr/lib/gcc/x86_64-linux-gnu/5/cc1",
+               "pid" : 21304,
+               "exit_status" : 0,
+               "cwd" : "/home/myuser/tracer/demo"
+            },
+            {
+               "exit_status" : 0,
+               "cwd" : "/home/myuser/tracer/demo",
+               "args" : [
+                  "--64",
+                  "-o",
+                  "foo.o",
+                  "/tmp/ccKTtnts.s"
+               ],
+               "cmd" : "as",
+               "pid" : 21305
+            }
+         ],
+         "exit_status" : 0,
+         "cwd" : "/home/myuser/tracer/demo"
+      },
+      {
+         "children" : [
+            {
+               "children" : [
+                  {
+                     "exit_status" : 0,
+                     "cwd" : "/home/myuser/tracer/demo",
+                     "pid" : 21308,
+                     "cmd" : "/usr/bin/ld",
+                     "args" : [
+                        "-plugin",
+                        "/usr/lib/gcc/x86_64-linux-gnu/5/liblto_plugin.so",
+                        "-plugin-opt=/usr/lib/gcc/x86_64-linux-gnu/5/lto-wrapper",
+                        "-plugin-opt=-fresolution=/tmp/cctGHp0H.res",
+                        "-plugin-opt=-pass-through=-lgcc",
+                        "-plugin-opt=-pass-through=-lgcc_s",
+                        "-plugin-opt=-pass-through=-lc",
+                        "-plugin-opt=-pass-through=-lgcc",
+                        "-plugin-opt=-pass-through=-lgcc_s",
+                        "--sysroot=/",
+                        "--build-id",
+                        "--eh-frame-hdr",
+                        "-m",
+                        "elf_x86_64",
+                        "--hash-style=gnu",
+                        "--as-needed",
+                        "-dynamic-linker",
+                        "/lib64/ld-linux-x86-64.so.2",
+                        "-z",
+                        "relro",
+                        "-o",
+                        "foo",
+                        "/usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu/crt1.o",
+                        "/usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu/crti.o",
+                        "/usr/lib/gcc/x86_64-linux-gnu/5/crtbegin.o",
+                        "-L/usr/lib/gcc/x86_64-linux-gnu/5",
+                        "-L/usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu",
+                        "-L/usr/lib/gcc/x86_64-linux-gnu/5/../../../../lib",
+                        "-L/lib/x86_64-linux-gnu",
+                        "-L/lib/../lib",
+                        "-L/usr/lib/x86_64-linux-gnu",
+                        "-L/usr/lib/../lib",
+                        "-L/usr/lib/gcc/x86_64-linux-gnu/5/../../..",
+                        "foo.o",
+                        "-lm",
+                        "-lgcc",
+                        "--as-needed",
+                        "-lgcc_s",
+                        "--no-as-needed",
+                        "-lc",
+                        "-lgcc",
+                        "--as-needed",
+                        "-lgcc_s",
+                        "--no-as-needed",
+                        "/usr/lib/gcc/x86_64-linux-gnu/5/crtend.o",
+                        "/usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu/crtn.o"
+                     ]
+                  }
+               ],
+               "cmd" : "/usr/lib/gcc/x86_64-linux-gnu/5/collect2",
+               "pid" : 21307,
+               "args" : [
+                  "-plugin",
+                  "/usr/lib/gcc/x86_64-linux-gnu/5/liblto_plugin.so",
+                  "-plugin-opt=/usr/lib/gcc/x86_64-linux-gnu/5/lto-wrapper",
+                  "-plugin-opt=-fresolution=/tmp/cctGHp0H.res",
+                  "-plugin-opt=-pass-through=-lgcc",
+                  "-plugin-opt=-pass-through=-lgcc_s",
+                  "-plugin-opt=-pass-through=-lc",
+                  "-plugin-opt=-pass-through=-lgcc",
+                  "-plugin-opt=-pass-through=-lgcc_s",
+                  "--sysroot=/",
+                  "--build-id",
+                  "--eh-frame-hdr",
+                  "-m",
+                  "elf_x86_64",
+                  "--hash-style=gnu",
+                  "--as-needed",
+                  "-dynamic-linker",
+                  "/lib64/ld-linux-x86-64.so.2",
+                  "-z",
+                  "relro",
+                  "-o",
+                  "foo",
+                  "/usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu/crt1.o",
+                  "/usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu/crti.o",
+                  "/usr/lib/gcc/x86_64-linux-gnu/5/crtbegin.o",
+                  "-L/usr/lib/gcc/x86_64-linux-gnu/5",
+                  "-L/usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu",
+                  "-L/usr/lib/gcc/x86_64-linux-gnu/5/../../../../lib",
+                  "-L/lib/x86_64-linux-gnu",
+                  "-L/lib/../lib",
+                  "-L/usr/lib/x86_64-linux-gnu",
+                  "-L/usr/lib/../lib",
+                  "-L/usr/lib/gcc/x86_64-linux-gnu/5/../../..",
+                  "foo.o",
+                  "-lm",
+                  "-lgcc",
+                  "--as-needed",
+                  "-lgcc_s",
+                  "--no-as-needed",
+                  "-lc",
+                  "-lgcc",
+                  "--as-needed",
+                  "-lgcc_s",
+                  "--no-as-needed",
+                  "/usr/lib/gcc/x86_64-linux-gnu/5/crtend.o",
+                  "/usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu/crtn.o"
+               ],
+               "cwd" : "/home/myuser/tracer/demo",
+               "exit_status" : 0
+            }
+         ],
+         "cmd" : "gcc",
+         "pid" : 21306,
+         "args" : [
+            "-o",
+            "foo",
+            "foo.o",
+            "-lm"
+         ],
+         "cwd" : "/home/myuser/tracer/demo",
+         "exit_status" : 0
+      }
+   ],
+   "args" : []
+}
+```
+
+This includes more information than one would find in a Clang
+compilation database, such as the calls to the linker called by GCC.
 
 Tracing Java Build Processes
 ============================

@@ -1,4 +1,4 @@
-/*
+	/*
  * Copyright (c) 2019, Johns Hopkins University Applied Physics Laboratory
  * All rights reserved.
  *
@@ -29,6 +29,10 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
+/* needed for asprintf() function */
+#define _GNU_SOURCE
+
 #include <sys/ptrace.h>
 #include <sys/reg.h>
 #include <sys/wait.h>
@@ -107,15 +111,21 @@ static struct option long_options[] = {
 	.flag           = NULL,
 	.val            = 'c'
     },
+    {
+	.name           = "trace-mmap",
+	.has_arg        = 0,
+	.flag           = NULL,
+	.val            = 'm'
+    },
     {0}
 };
 
-static char *short_options = "vl:o:e:d:D:Esc:";
+static char *short_options = "mvl:o:e:d:D:Esc:";
 void print_usage(char *progname){
     fprintf(stderr, "Usage: %s [--no-record-env|-E] [--verbose|-v] [--log|-l <file>]\n"
 	    "\t[--dont-descend|-d cmd] [--dont-descend-re|-D regex] [--tracee-error-code|-c NUM]\n"
 	    "\t[--child-out|-o <file>] [--child-error|-e <file>] [--stream-execs-mode|-s]\n"
-	    "\t<tracefile> -- <prog> [args...]\n",
+	    "\t[--trace-mmap|-m] <tracefile> -- <prog> [args...]\n",
 	    progname);
     exit(1);
 }
@@ -133,10 +143,16 @@ static int dont_descend_regex_set = 0;
 
 static int stream_execs_mode = 0;
 static int tracee_error_code = 0;
+static int trace_mmap = 0;
 
 struct buffer {
     size_t size;
     unsigned char bytes[];
+};
+
+struct mmap_rec{
+    char *path;
+    struct mmap_rec *next;
 };
 
 struct rec{
@@ -153,6 +169,8 @@ struct rec{
 
     size_t nr_arg_files;
     struct buffer **arg_files;
+
+    struct mmap_rec *mmaps;
 
     struct rec *children;
     struct rec *prev_sibling;
@@ -247,7 +265,23 @@ void rehash_cmd_table(void){
 }
 
 
+void free_mmap_recs(struct mmap_rec *mrec){
+    while(mrec){
+	struct mmap_rec *next = mrec->next;
+	free(mrec->path);
+	free(mrec);
+	mrec = next;
+    }
+}
+
 void free_rec_internal_fields(struct rec *prec){
+    /* Note: this function gets called to free the internal fields of
+     * a record for a process doing an `exec()` call, the record
+     * itself may get reused so we must leave it in a valid state. We
+     * specifically preserve the `mmaps` field since we want to keep
+     * track of all executable mappings this process has ever had.
+     */
+
     /*
        Elements of argv reference into the buffer pointed to by
        cmd. We still have to free the array, but not the individual
@@ -258,8 +292,11 @@ void free_rec_internal_fields(struct rec *prec){
 
     free(prec->cwd);
     if(prec->env){
-      free(prec->env[0]);
-      free(prec->env);
+	free(prec->env[0]); /* like argv, env[0] points to the buffer
+			     * containing all the env variables, and
+			     * env[1...] points to offsets in that
+			     * buffer */
+	free(prec->env);
     }
     if(prec->arg_files){
 	for(size_t i = 0;i<prec->nr_arg_files;i++){
@@ -267,17 +304,6 @@ void free_rec_internal_fields(struct rec *prec){
 	}
 	free(prec->arg_files);
     }
-}
-
-void free_recs(struct rec *prec){
-  while(prec){
-    struct rec *tmp;
-    free_rec_internal_fields(prec);
-
-    tmp = prec->next;
-    free(prec);
-    prec = tmp;
-  }
 }
 
 void append_child(struct rec *parent, struct rec *new_child){
@@ -407,7 +433,7 @@ struct rec *create_rec(struct rec *parent, pid_t pid){
     res->exited = 0;
     res->nr_arg_files = 0;
     res->arg_files = NULL;
-
+    res->mmaps = NULL;
     res->children = NULL;
 
     if((!stream_execs_mode) && (parent != NULL)){
@@ -468,6 +494,7 @@ void dispose_rec(struct rec *prec){
 	prev->next = prec->next;
     }
     --total_cmds;
+    free_mmap_recs(prec->mmaps);
     free_rec_internal_fields(prec);
     free(prec);
 }
@@ -538,6 +565,17 @@ void print_recs(struct rec *r, int depth){
 	    fputc(']', outfile);
 	}
     }
+    if(r->mmaps != NULL){
+	fprintf(outfile, ", \"mmaps\": [");
+	struct mmap_rec *m;
+	for(m = r->mmaps;m != NULL;m = m->next){
+	    escape_bytes(m->path, strlen(m->path), &escaped);
+	    fprintf(outfile, "\"%s\"%s", escaped, m->next ? "," :"");
+	    free(escaped);
+	}
+	fprintf(outfile, "]");
+    }
+
     if((c = r->children) != NULL){
 	fprintf(outfile, ", \"children\": [");
 	do{
@@ -612,12 +650,10 @@ void detach_from_process(pid_t p){
 int read_file(char *cwd, char *infile, struct buffer **outbuf){
     char *infile_abs = infile;
     if(infile[0] != '/'){
-	size_t len = strlen(cwd) + 1 + strlen(infile) + 1;
-	infile_abs = malloc(len);
-	if(infile_abs == NULL){
+	if(asprintf(&infile_abs, "%s/%s", cwd, infile) < 0){
+	    fprintf(logfile, "Error: failed to construct absolute filename '%s/%s'\n", cwd, infile);
 	    return -1;
 	}
-	snprintf(infile_abs, len, "%s/%s", cwd, infile);
     }
 
     int fd = open(infile_abs, O_RDONLY);
@@ -627,12 +663,32 @@ int read_file(char *cwd, char *infile, struct buffer **outbuf){
     }
 
     if(fd < 0){
-	fprintf(logfile, "Error: Unable to open file \"%s\": %s\n", infile, strerror(errno));
-	close(fd);
+	/* this routine is used to read the contents of files named by
+	 * arguments prefixed with an "@", this is a fairly common
+	 * idiom and is heavily used by commands that take a lot of
+	 * arguments (looking at you `javac`) so we need to do it,
+	 * **but** some arguments may be prefixed with an "@" because
+	 * that's what the argument is (notably autoconf generated
+	 * configure scripts generate makefiles with commands like
+	 * `echo "@@@$MAKE@@@@" because they think that sort of thing
+	 * is fun).  So, the absence of a file here might not actually
+	 * be an error. If the open fails we just return -1 and the
+	 * caller sticks a NULL value into the arg_files list, it's up
+	 * to the consumer to figure out what went on but at least
+	 * they know that for every arg prefixed with "@" there will
+	 * be an entry in arg_files.
+	 */
 	return -1;
     }
 
     struct stat st;
+    /* Using stat to calculate file size isn't safe for virtual files
+     * (e.g., in /proc) but since our intended use case is argument
+     * files passed to things like `javac` we're going to call this ok
+     * enough. Note that unlike in the `open()` case above, if the
+     * `stat()` call fails we really do want to print an error since
+     * this is no longer expected behavior.
+     */
     if(fstat(fd, &st) < 0){
 	fprintf(logfile, "Error: Unable to stat file \"%s\": %s\n", infile, strerror(errno));
 	close(fd);
@@ -646,7 +702,8 @@ int read_file(char *cwd, char *infile, struct buffer **outbuf){
     }
 
     if((*outbuf = malloc(sizeof(struct buffer) + (size_t)st.st_size)) == NULL){
-	fprintf(logfile, "Error: Unable to allocate %zd bytes for buffer: %s\n", st.st_size, strerror(errno));
+	fprintf(logfile, "Error: Unable to allocate %zd bytes for buffer: %s\n",
+		st.st_size, strerror(errno));
 	close(fd);
 	return -1;
     }
@@ -659,7 +716,7 @@ int read_file(char *cwd, char *infile, struct buffer **outbuf){
 	close(fd);
 	return -1;
     }
-
+    close(fd);
     return 0;
 }
 
@@ -668,6 +725,7 @@ void set_rec_cwd(struct rec *prec, pid_t p) {
     // /proc/<pid>/cwd is a symlink to the working directory of process <pid>
     char cwd_sl[MAX_FILENAME_LEN];
     char cwd[MAX_FILENAME_LEN];
+    // snprintf usage here is fine, %d can't be more than 21 bytes.
     snprintf(cwd_sl, MAX_FILENAME_LEN, "/proc/%d/cwd", p);
     ssize_t bytes_read = readlink(cwd_sl, cwd, MAX_FILENAME_LEN);
     if (bytes_read <= 0) {
@@ -688,6 +746,7 @@ void set_rec_cwd(struct rec *prec, pid_t p) {
 
 void set_rec_env(struct rec *prec, pid_t p) {
     char filename[MAX_FILENAME_LEN];
+    // snprintf usage here is fine, %d can't be more than 21 bytes.
     snprintf(filename, MAX_FILENAME_LEN, "/proc/%d/environ", p);
     FILE* envf = fopen(filename, "r");
     if (!envf) {
@@ -740,6 +799,9 @@ void set_rec_env(struct rec *prec, pid_t p) {
             curStart++;
             curEntry++;
         }
+    }else{
+	free(buf);
+	prec->env = NULL;
     }
     prec->nenv = nentries;
 
@@ -748,6 +810,7 @@ void set_rec_env(struct rec *prec, pid_t p) {
 
 void set_rec_cmdline(struct rec *prec, pid_t p){
     char filename[MAX_FILENAME_LEN];
+    // snprintf usage here is fine, %d can't be more than 21 bytes.
     snprintf(filename, MAX_FILENAME_LEN, "/proc/%d/cmdline", p);
     FILE *cmdlinef = fopen(filename, "r");
     if(cmdlinef == NULL){
@@ -831,6 +894,76 @@ void set_rec_cmdline(struct rec *prec, pid_t p){
 	}
     }
 }
+
+int file_in_mmap_list(struct rec *prec, char *filename){
+    struct mmap_rec *map = prec->mmaps;
+    while(map){
+	if(!strcmp(map->path, filename)){
+	    return 1;
+	}
+	map = map->next;
+    }
+    return 0;
+}
+
+void handle_mmap(struct rec *prec){
+    if(!trace_mmap){
+	return;
+    }
+    char filename[MAX_FILENAME_LEN];
+    // snprintf usage here is fine, %d can't be more than 21 bytes.
+    snprintf(filename, MAX_FILENAME_LEN, "/proc/%d/maps", prec->pid);
+    FILE *f = fopen(filename, "r");
+    if(f == NULL){
+	fprintf(logfile, "Error: unable to open maps file '%s'\n", filename);
+	return;
+    }
+    char *path;
+    char exe_flag;
+    /* This is arguably woefully inefficient. On every call to mmap,
+     * we scan through the list of mmap()ed regions in
+     * /proc/[pid]/maps and for each entry marked executable we
+     * perform a linear search through our list of known mappings to
+     * see if we've already recorded it (O(n^2)). But, the number of
+     * executable mappings *should* never be too long (on my ubuntu
+     * system the largest I see is 203 executable file mappings from
+     * gnome-shell, the average is about 30). So I'm calling this ok.
+     */
+    while(fscanf(f, "%*x-%*x %*c%*c%c%*c %*x %*x:%*x %*d", &exe_flag) == 1){
+	char c;
+	// skip anonymous maps (no filename) and [heap] [stack]
+	while(((c = fgetc(f)) == ' ') || (c == '\t')){
+	}
+	if(c == '\n'){
+	    continue;
+	}
+	if(c == '['){
+	    fscanf(f, "%*s\n");
+	    continue;
+	}
+	ungetc(c, f);
+	fscanf(f, "%m[^\n]\n", &path);
+
+	if(!file_in_mmap_list(prec, path)){
+	    struct mmap_rec *new_rec = malloc(sizeof(struct mmap_rec));
+	    if(new_rec == NULL){
+		fprintf(logfile, "Error: failed to allocate new mmap record");
+		free(path);
+		continue;
+	    }
+	    if(verbose){
+		fprintf(logfile, "\tcreating mmap record for file '%s'\n", path);
+	    }
+	    new_rec->path = path;
+	    new_rec->next = prec->mmaps;
+	    prec->mmaps   = new_rec;
+	}else{
+	    free(path);
+	}
+    }
+    fclose(f);
+}
+
 void handle_exec(struct rec *prec){
     pid_t p = prec->pid;
 
@@ -884,10 +1017,7 @@ void handle_fork_like_event(int status, struct rec *prec){
 	    fprintf(logfile, "\tHaven't seen child %ld yet, creating record in anticipation\n", grandchild);
 	}
 
-	if((create_rec(prec, (pid_t)grandchild)) == NULL){
-	    fprintf(logfile, "Error allocating record!\n");
-	    exit(-1);
-	}
+	create_rec(prec, (pid_t)grandchild);
 	waitpid((pid_t)grandchild, NULL, 0);
 	set_ptrace_options((pid_t)grandchild);
     }
@@ -895,19 +1025,6 @@ void handle_fork_like_event(int status, struct rec *prec){
 	fprintf(logfile, "\tSending PTRACE_SYSCALL to grandchild %ld\n", grandchild);
     }
     ptrace(PTRACE_SYSCALL, grandchild, 0, 0);
-}
-
-int setup_signalfd(void){
-    sigset_t set;
-    sigset_t blocked;
-
-    sigemptyset(&set);
-
-    sigprocmask(SIG_BLOCK, NULL, &blocked);
-    sigaddset(&set, SIGCHLD);
-    sigaddset(&blocked, SIGCHLD);
-    sigprocmask(SIG_BLOCK, &blocked, NULL);
-    return signalfd(-1, &set, SFD_CLOEXEC);
 }
 
 int do_trace(pid_t child){
@@ -934,10 +1051,7 @@ int do_trace(pid_t child){
 		fprintf(logfile, "\tPID %d is a new process, creating a record\n", (int)p);
 	    }
      	    // we haven't seen this process before. create a record.
-	    if((prec = create_rec(NULL, p)) == NULL){
-		fprintf(logfile, "Error allocating record!\n");
-		exit(-1);
-	    }
+	    prec = create_rec(NULL, p);
 	    set_ptrace_options(p);
 	}
 
@@ -986,7 +1100,9 @@ int do_trace(pid_t child){
 			    detach_from_process(p);
 			    continue;
 			}
-	    	    }
+	    	    }else if(regs.rax > 0 && regs.orig_rax == SYS_mmap){
+			handle_mmap(prec);
+		    }
 	    	}
 	    } else if (WSTOPSIG(status) != SIGTRAP){
 		if(verbose){
@@ -1100,6 +1216,9 @@ int main(int argc, char *argv[]){
 	    break;
 	case 'c':
 	    tracee_error_code = atoi(optarg);
+	    break;
+	case 'm':
+	    trace_mmap = 1;
 	    break;
 	default: print_usage(argv[0]);
 	    break;

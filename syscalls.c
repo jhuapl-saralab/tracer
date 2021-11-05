@@ -31,6 +31,7 @@
  */
 
 #include <syscall.h>
+#include "syscalls.h"
 
 const char* syscall_name_from_id(int syscall) {
       switch(syscall) {

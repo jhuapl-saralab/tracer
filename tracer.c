@@ -34,7 +34,7 @@
 #define _GNU_SOURCE
 
 #include <sys/ptrace.h>
-#include <sys/reg.h>
+#include <sys/user.h>
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -1066,29 +1066,48 @@ int do_trace(pid_t child){
 		}
 	    } else if(WSTOPSIG(status) == (SIGTRAP | 0x80)){
 		/* syscall entry */
+
+
 		struct user_regs_struct regs;
+		struct iovec iov = {
+		    .iov_base = &regs,
+		    .iov_len  = sizeof(regs)
+		};
+		ptrace(PTRACE_GETREGSET, p, 1, &iov);
+
+#ifdef __aarch64__
+		long long syscall_num = regs.regs[8]; // only valid on entrance
+		long long syscall_ret = regs.regs[0]; // only valid on exit
+#else
 		/* we're not going to worry about 32 vs 64 bit here.
 		   All we are doing is looking at rax/eax which should
 		   be the same regardless of word size.
 		*/
-		ptrace(PTRACE_GETREGS, p, NULL, &regs);
-
+		long long syscall_num = regs.orig_rax; // always valid
+		long long syscall_ret = regs.rax;      // only valid on exit
+#endif
 	    	if(!prec->in_syscall){
 		    if(verbose){
-	    		fprintf(logfile, "\tEntering syscall %s. orig_rax: %lld rax: %lld\n",
-				syscall_name_from_id((int)regs.orig_rax), regs.orig_rax, regs.rax);
+			fprintf(logfile, "\tEntering syscall %s. num: %lld\n",
+				syscall_name_from_id((int)syscall_num), syscall_num);
 	    	    }
-	    	    prec->in_syscall = 1;
+		    /* ARM64 doesn't stash the syscall number in the user regs struct, so
+		       we can just remember it here.  0 is a valid syscall number (read
+		       on x86) so we shift left by 1.
+
+		       NR_SYSCALLS is < INT_MAX/2 so this is fine. */
+		    prec->in_syscall = (syscall_num << 1) | 1; 
 	    	}else{
+		    syscall_num = prec->in_syscall >> 1;
 	    	    prec->in_syscall = 0;
 
 	    	    if(verbose){
-	    		fprintf(logfile, "\tFinished call to %s. orig_rax: %lld rax: %lld\n",
-	    			syscall_name_from_id((int)regs.orig_rax), regs.orig_rax, regs.rax);
+			fprintf(logfile, "\tFinished call to %s. num: %lld ret: %lld\n",
+				syscall_name_from_id((int)syscall_num), syscall_num, syscall_ret);
 	    	    }
 
-	    	    if(regs.orig_rax == SYS_clone){
-	    	    }else if(regs.rax == 0 && regs.orig_rax == SYS_execve){
+		    if(syscall_num == SYS_clone){
+		    }else if(syscall_ret == 0 && syscall_num == SYS_execve){
 			handle_exec(prec);
 			if(!should_descend(prec)){
 			    if(verbose){
@@ -1100,7 +1119,7 @@ int do_trace(pid_t child){
 			    detach_from_process(p);
 			    continue;
 			}
-	    	    }else if(regs.rax > 0 && regs.orig_rax == SYS_mmap){
+		    }else if(syscall_ret > 0 && syscall_num == SYS_mmap){
 			handle_mmap(prec);
 		    }
 	    	}

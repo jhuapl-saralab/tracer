@@ -34,16 +34,17 @@ CWD=`pwd`
 all: test-relative-argfile test-absolute-argfile test-nonascii-argfile \
 	test-threadhello test-simple
 
+ECHO=`which echo`
 test-relative-argfile:
-	$(TRACER) -E -s trace.json -- bash -c "/bin/echo @./arg_file > /dev/null"
+	$(TRACER) -E -s trace.json -- bash -c "${ECHO} @./arg_file > /dev/null"
 	grep -q '"arg_files": \["hello world\\n"\]' trace.json
 
 test-absolute-argfile:
-	$(TRACER) -E -s trace.json -- bash -c "/bin/echo @${CWD}/arg_file > /dev/null"
+	$(TRACER) -E -s trace.json -- bash -c "${ECHO} @${CWD}/arg_file > /dev/null"
 	grep -q '"arg_files": \["hello world\\n"\]' trace.json
 
 test-nonascii-argfile:
-	$(TRACER) -E -s trace.json -- bash -c "/bin/echo @../tracer > /dev/null"
+	$(TRACER) -E -s trace.json -- bash -c "${ECHO} @../tracer > /dev/null"
 
 test-threadhello:
 	$(TRACER) trace.json -- ./threadhello > /dev/null 2>&1
